@@ -2,12 +2,24 @@ from flask import Flask, render_template, request, send_file, redirect, jsonify
 import requests
 import pandas as pd
 import io
+import time
 
 app = Flask(__name__)
 
 PROJECT_ID = "csi-esp"
 COLLECTION = "csi"
 BASE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/{COLLECTION}"
+
+# ── Cache ──
+_cache = {"docs": None, "ts": 0}
+CACHE_TTL = 30
+
+def get_docs():
+    now = time.time()
+    if _cache["docs"] is None or now - _cache["ts"] > CACHE_TTL:
+        _cache["docs"] = parse_docs(fetch_all_docs())
+        _cache["ts"] = now
+    return _cache["docs"]
 
 def fetch_all_docs():
     docs = []
@@ -131,8 +143,7 @@ def build_chart_data(df):
 
 @app.route("/")
 def index():
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     sort_order = request.args.get("sort", "desc")
     timestamps = sorted(grouped.keys(), reverse=(sort_order == "desc"))
@@ -155,8 +166,7 @@ def index():
 
 @app.route("/api/session/<path:timestamp>")
 def api_session(timestamp):
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     selected = grouped.get(timestamp, [])
     df = build_dataframe(selected)
@@ -167,8 +177,7 @@ def api_session(timestamp):
 
 @app.route("/api/table/<path:timestamp>")
 def api_table(timestamp):
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     selected = grouped.get(timestamp, [])
     df = build_dataframe(selected)
@@ -182,16 +191,14 @@ def api_table(timestamp):
 
 @app.route("/api/timestamps")
 def api_timestamps():
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     return jsonify({"timestamps": sorted(grouped.keys(), reverse=True)})
 
 
 @app.route("/download/<path:timestamp>")
 def download(timestamp):
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     selected = grouped.get(timestamp, [])
     df = build_dataframe(selected)
@@ -208,12 +215,13 @@ def download(timestamp):
 
 @app.route("/delete/<path:timestamp>", methods=["POST"])
 def delete(timestamp):
-    raw = fetch_all_docs()
-    docs = parse_docs(raw)
+    docs = get_docs()
     grouped = group_by_timestamp(docs)
     selected = grouped.get(timestamp, [])
     names = [d.get("name") for d in selected if "name" in d]
     delete_documents(names)
+    # invalidate cache after delete
+    _cache["docs"] = None
     return redirect("/")
 
 
