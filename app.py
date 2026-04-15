@@ -1,35 +1,26 @@
-from flask import Flask, render_template, request, send_file, redirect
+from flask import Flask, render_template, request, send_file, redirect, jsonify
 import requests
 import pandas as pd
 import io
 
 app = Flask(__name__)
 
-# ================== CONFIG ==================
 PROJECT_ID = "csi-esp"
 COLLECTION = "csi"
-
 BASE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/{COLLECTION}"
-
-# ================== FIRESTORE ==================
 
 def fetch_all_docs():
     docs = []
     params = {"pageSize": 300}
-
     while True:
         r = requests.get(BASE_URL, params=params)
         data = r.json()
-
         docs += data.get("documents", [])
         token = data.get("nextPageToken")
-
         if not token:
             break
         params["pageToken"] = token
-
     return docs
-
 
 def parse_value(v):
     if "integerValue" in v: return int(v["integerValue"])
@@ -41,25 +32,14 @@ def parse_value(v):
         return {k: parse_value(fv) for k, fv in v["mapValue"]["fields"].items()}
     return None
 
-
 def parse_docs(raw_docs):
     parsed = []
-
     for d in raw_docs:
-        # ✅ FIX: skip invalid docs
         if "fields" not in d:
-            print("⚠️ Skipping invalid doc:", d)
             continue
-
         fields = {k: parse_value(v) for k, v in d["fields"].items()}
-
-        parsed.append({
-            "name": d.get("name", ""),
-            **fields
-        })
-
+        parsed.append({"name": d.get("name", ""), **fields})
     return parsed
-
 
 def group_by_timestamp(docs):
     groups = {}
@@ -68,17 +48,12 @@ def group_by_timestamp(docs):
         groups.setdefault(ts, []).append(d)
     return groups
 
-
-def build_dataframe(docs, sort_by="subcarrier"):
+def build_dataframe(docs):
     rows = []
-
     for doc in docs:
-        # ✅ FIX: skip docs without samples
         if "samples" not in doc:
             continue
-
         ap_idx = doc.get("ap_index", -1)
-
         for s in doc.get("samples", []):
             rows.append({
                 "timestamp": doc.get("session_timestamp", "unknown"),
@@ -91,85 +66,156 @@ def build_dataframe(docs, sort_by="subcarrier"):
                 "amplitude": s.get("amplitude"),
                 "angle_rad": s.get("angle_rad")
             })
-
     df = pd.DataFrame(rows)
-
     if df.empty:
         return df
-
-    # ✅ Sorting
-    if sort_by == "subcarrier":
-        df = df.sort_values(by=["subcarrier", "packet"])
-    elif sort_by == "packet":
-        df = df.sort_values(by=["packet", "subcarrier"])
-
-    return df
-
+    return df.sort_values(by=["subcarrier", "packet"])
 
 def delete_documents(doc_names):
     for name in doc_names:
-        url = f"https://firestore.googleapis.com/v1/{name}"
-        requests.delete(url)
+        requests.delete(f"https://firestore.googleapis.com/v1/{name}")
 
+def build_chart_data(df):
+    if df.empty:
+        return {}
+    charts = {}
 
-# ================== ROUTES ==================
+    amp_by_sub = {}
+    for ap, group in df.groupby("ap"):
+        sub_avg = group.groupby("subcarrier")["amplitude"].mean()
+        amp_by_sub[str(ap)] = {
+            "subcarriers": sub_avg.index.tolist(),
+            "amplitudes": sub_avg.values.tolist()
+        }
+    charts["amplitude_by_subcarrier"] = amp_by_sub
+
+    rssi_by_packet = {}
+    for ap, group in df.groupby("ap"):
+        pkt_avg = group.groupby("packet")["rssi"].mean()
+        rssi_by_packet[str(ap)] = {
+            "packets": pkt_avg.index.tolist(),
+            "rssi": pkt_avg.values.tolist()
+        }
+    charts["rssi_by_packet"] = rssi_by_packet
+
+    phase_by_sub = {}
+    for ap, group in df.groupby("ap"):
+        sub_avg = group.groupby("subcarrier")["angle_rad"].mean()
+        phase_by_sub[str(ap)] = {
+            "subcarriers": sub_avg.index.tolist(),
+            "phase": sub_avg.values.tolist()
+        }
+    charts["phase_by_subcarrier"] = phase_by_sub
+
+    for ap, group in df.groupby("ap"):
+        pivot = group.pivot_table(
+            index="subcarrier", columns="packet",
+            values="amplitude", aggfunc="mean"
+        )
+        charts.setdefault("amplitude_heatmap", {})[str(ap)] = {
+            "subcarriers": pivot.index.tolist(),
+            "packets": pivot.columns.tolist(),
+            "values": pivot.fillna(0).values.tolist()
+        }
+
+    charts["stats"] = {
+        "total_rows": len(df),
+        "aps": df["ap"].unique().tolist(),
+        "subcarriers": int(df["subcarrier"].nunique()),
+        "packets": int(df["packet"].nunique()),
+        "avg_amplitude": round(float(df["amplitude"].mean()), 4),
+        "avg_rssi": round(float(df["rssi"].mean()), 2),
+    }
+    return charts
+
 
 @app.route("/")
 def index():
     raw = fetch_all_docs()
     docs = parse_docs(raw)
     grouped = group_by_timestamp(docs)
-
     sort_order = request.args.get("sort", "desc")
+    timestamps = sorted(grouped.keys(), reverse=(sort_order == "desc"))
 
-    timestamps = list(grouped.keys())
-    timestamps.sort(reverse=(sort_order == "desc"))
+    ts_meta = {}
+    for ts in timestamps:
+        group = grouped[ts]
+        ap_set = set()
+        sample_count = 0
+        for d in group:
+            ap_set.add(d.get("ap_index", "?"))
+            sample_count += len(d.get("samples", []))
+        ts_meta[ts] = {"aps": sorted(list(ap_set)), "samples": sample_count}
 
-    return render_template("index.html", timestamps=timestamps, sort=sort_order)
+    return render_template("index.html",
+                           timestamps=timestamps,
+                           sort=sort_order,
+                           ts_meta=ts_meta)
 
 
-@app.route("/download/<timestamp>")
-def download(timestamp):
-    sort_by = request.args.get("sort_by", "subcarrier")
-
+@app.route("/api/session/<path:timestamp>")
+def api_session(timestamp):
     raw = fetch_all_docs()
     docs = parse_docs(raw)
     grouped = group_by_timestamp(docs)
-
     selected = grouped.get(timestamp, [])
-    df = build_dataframe(selected, sort_by=sort_by)
+    df = build_dataframe(selected)
+    if df.empty:
+        return jsonify({"error": "No data found for this session."})
+    return jsonify(build_chart_data(df))
 
+
+@app.route("/api/table/<path:timestamp>")
+def api_table(timestamp):
+    raw = fetch_all_docs()
+    docs = parse_docs(raw)
+    grouped = group_by_timestamp(docs)
+    selected = grouped.get(timestamp, [])
+    df = build_dataframe(selected)
+    if df.empty:
+        return jsonify({"error": "No data found.", "rows": [], "columns": []})
+    return jsonify({
+        "columns": df.columns.tolist(),
+        "rows": df.fillna("").values.tolist()
+    })
+
+
+@app.route("/api/timestamps")
+def api_timestamps():
+    raw = fetch_all_docs()
+    docs = parse_docs(raw)
+    grouped = group_by_timestamp(docs)
+    return jsonify({"timestamps": sorted(grouped.keys(), reverse=True)})
+
+
+@app.route("/download/<path:timestamp>")
+def download(timestamp):
+    raw = fetch_all_docs()
+    docs = parse_docs(raw)
+    grouped = group_by_timestamp(docs)
+    selected = grouped.get(timestamp, [])
+    df = build_dataframe(selected)
     if df.empty:
         return "No valid data found for this timestamp."
-
     output = io.StringIO()
     df.to_csv(output, index=False)
-
     mem = io.BytesIO()
     mem.write(output.getvalue().encode())
     mem.seek(0)
-
-    return send_file(mem,
-                     mimetype="text/csv",
-                     as_attachment=True,
-                     download_name=f"{timestamp}_{sort_by}.csv")
+    return send_file(mem, mimetype="text/csv", as_attachment=True,
+                     download_name=f"{timestamp}_subcarrier.csv")
 
 
-@app.route("/delete/<timestamp>", methods=["POST"])
+@app.route("/delete/<path:timestamp>", methods=["POST"])
 def delete(timestamp):
     raw = fetch_all_docs()
     docs = parse_docs(raw)
     grouped = group_by_timestamp(docs)
-
     selected = grouped.get(timestamp, [])
     names = [d.get("name") for d in selected if "name" in d]
-
     delete_documents(names)
-
     return redirect("/")
 
-
-# ================== MAIN ==================
 
 if __name__ == "__main__":
     app.run(debug=True)

@@ -1,44 +1,391 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>CSI Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CSI Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
 <body>
+<div class="container">
 
-<h1>📡 CSI Visualizer</h1>
+  <header>
+    <div class="logo">
+      <div class="logo-icon">📡</div>
+      <div>
+        <h1>CSI Dashboard</h1>
+        <p>CHANNEL STATE INFORMATION VIEWER</p>
+      </div>
+    </div>
+    <div class="live-badge"><div class="live-dot"></div>MONITORING</div>
+  </header>
 
-<div class="controls">
-    <form method="get">
-        <label>Sort timestamps:</label>
-        <select name="sort" onchange="this.form.submit()">
-            <option value="desc" {% if sort=="desc" %}selected{% endif %}>Newest</option>
-            <option value="asc" {% if sort=="asc" %}selected{% endif %}>Oldest</option>
-        </select>
-    </form>
+  <!-- ══════════ LIST VIEW ══════════ -->
+  <div class="view active" id="view-list">
+
+    <div class="realtime-card">
+      <div>
+        <h3>⚡ LATEST SESSION</h3>
+        <div id="realtime-ts">Loading…</div>
+        <div class="realtime-sub">Polls every 15 seconds</div>
+      </div>
+      <button class="action-btn" onclick="openLatest()">View Live →</button>
+    </div>
+
+    <div class="controls-bar">
+      <div class="section-label">{{ timestamps|length }} sessions recorded</div>
+      <div class="sort-control">
+        <label>Sort:</label>
+        <form method="get">
+          <select name="sort" onchange="this.form.submit()">
+            <option value="desc" {% if sort=="desc" %}selected{% endif %}>Newest first</option>
+            <option value="asc" {% if sort=="asc" %}selected{% endif %}>Oldest first</option>
+          </select>
+        </form>
+      </div>
+    </div>
+
+    <div class="sessions-grid">
+      {% if timestamps %}
+        {% for ts in timestamps %}
+        {% set meta = ts_meta.get(ts, {}) %}
+        <div class="session-card">
+          <div onclick="openViz('{{ ts }}')">
+            <div class="session-ts">{{ ts }}</div>
+            <div class="session-meta">
+              <div class="meta-pill"><span class="key">APs</span> {{ meta.get('aps', [])|join(', ') or '—' }}</div>
+              <div class="meta-pill"><span class="key">Samples</span> {{ meta.get('samples', 0) }}</div>
+            </div>
+          </div>
+          <div class="session-actions">
+            <button class="btn-viz" onclick="openViz('{{ ts }}')">📊 Visualize</button>
+            <a class="btn-dl" href="/download/{{ ts }}">⬇ CSV</a>
+            <form action="/delete/{{ ts }}" method="post" style="display:inline">
+              <button class="btn-del" type="submit" onclick="return confirm('Delete this session?')">✕</button>
+            </form>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty">
+          <div class="empty-icon">🛰</div>
+          <p>No sessions recorded yet.</p>
+        </div>
+      {% endif %}
+    </div>
+
+  </div>
+
+  <!-- ══════════ VIZ VIEW ══════════ -->
+  <div class="view" id="view-viz">
+
+    <button class="btn-back" onclick="closeViz()">← Back to sessions</button>
+
+    <div class="viz-header">
+      <h2>Session Analysis</h2>
+      <div class="viz-ts" id="viz-ts-label"></div>
+    </div>
+
+    <div class="stats-row" id="stats-row"></div>
+
+    <div class="ap-dl-bar">
+      <!-- Chart / Table toggle -->
+      <div style="display:flex;gap:8px;">
+        <button class="btn-tab-switch active" id="toggle-charts" onclick="showCharts()">📊 Charts</button>
+        <button class="btn-tab-switch" id="toggle-table" onclick="showTable()">🗂 Table</button>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div class="tab-bar" id="ap-tabs"></div>
+        <div class="rt-toggle">
+          <span class="toggle-label">Live refresh</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="rt-toggle">
+            <span class="slider"></span>
+          </label>
+          <span id="rt-status">Off</span>
+        </div>
+        <a class="btn-dl" id="viz-dl-link" href="#">⬇ CSV</a>
+      </div>
+    </div>
+
+    <div id="viz-error" class="error-box" style="display:none;margin-bottom:24px;"></div>
+
+    <!-- Charts panel -->
+    <div id="panel-charts">
+      <div class="charts-grid">
+        <div class="chart-card">
+          <h3>Amplitude vs Subcarrier</h3>
+          <div class="chart-wrap"><canvas id="chart-amp"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <h3>Phase vs Subcarrier</h3>
+          <div class="chart-wrap"><canvas id="chart-phase"></canvas></div>
+        </div>
+        <div class="chart-card chart-full">
+          <h3>RSSI over Packets</h3>
+          <div class="chart-wrap-tall"><canvas id="chart-rssi"></canvas></div>
+        </div>
+        <div class="chart-card chart-full">
+          <h3>Amplitude Profile per Subcarrier</h3>
+          <div class="chart-wrap-tall"><canvas id="chart-heat"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table panel -->
+    <div id="panel-table" style="display:none;">
+      <div class="chart-card">
+        <div class="table-toolbar">
+          <input class="table-search" id="table-search" type="text" placeholder="Search rows…" oninput="filterTable()">
+          <span class="row-count" id="row-count"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="data-table">
+            <thead id="table-head"></thead>
+            <tbody id="table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>CSI Dashboard · Project: csi-esp</span>
+    <span id="footer-time"></span>
+  </footer>
+
 </div>
 
-<table>
-<tr>
-    <th>Timestamp</th>
-    <th>Actions</th>
-</tr>
+<script>
+const AP_COLORS = ['#00d4ff','#7c3aed','#10b981','#f59e0b','#ef4444','#ec4899'];
+let currentData = null;
+let currentAP = null;
+let charts = {};
+let rtInterval = null;
+let latestTs = null;
+let allTableRows = [];
 
-{% for ts in timestamps %}
-<tr>
-    <td>{{ ts }}</td>
-    <td>
-        <a class="btn" href="/download/{{ ts }}?sort_by=subcarrier">CSV (Subcarrier)</a>
-        <a class="btn" href="/download/{{ ts }}?sort_by=packet">CSV (Packet)</a>
+setInterval(() => { document.getElementById('footer-time').textContent = new Date().toLocaleString(); }, 1000);
+document.getElementById('footer-time').textContent = new Date().toLocaleString();
 
-        <form action="/delete/{{ ts }}" method="post" style="display:inline;">
-            <button class="delete-btn" type="submit">Delete</button>
-        </form>
-    </td>
-</tr>
-{% endfor %}
+async function pollLatest() {
+  try {
+    const r = await fetch('/api/timestamps');
+    const data = await r.json();
+    if (data.timestamps && data.timestamps.length > 0) {
+      latestTs = data.timestamps[0];
+      document.getElementById('realtime-ts').textContent = latestTs;
+    }
+  } catch(e) {
+    document.getElementById('realtime-ts').textContent = 'Unavailable';
+  }
+}
+pollLatest();
+setInterval(pollLatest, 15000);
 
-</table>
+function openLatest() { if (latestTs) openViz(latestTs); }
 
+async function openViz(ts) {
+  document.getElementById('view-list').classList.remove('active');
+  document.getElementById('view-viz').classList.add('active');
+  document.getElementById('viz-ts-label').textContent = ts;
+  document.getElementById('viz-dl-link').href = '/download/' + ts;
+  document.getElementById('viz-error').style.display = 'none';
+  document.getElementById('stats-row').innerHTML =
+    '<div style="color:var(--muted);font-family:\'IBM Plex Mono\',monospace;font-size:0.8rem;padding:8px 0;">Loading…</div>';
+  document.getElementById('ap-tabs').innerHTML = '';
+  document.getElementById('table-head').innerHTML = '';
+  document.getElementById('table-body').innerHTML = '';
+  showCharts();
+
+  try {
+    const [chartRes, tableRes] = await Promise.all([
+      fetch('/api/session/' + encodeURIComponent(ts)),
+      fetch('/api/table/' + encodeURIComponent(ts))
+    ]);
+    const chartData = await chartRes.json();
+    const tableData = await tableRes.json();
+
+    if (chartData.error) throw new Error(chartData.error);
+    currentData = chartData;
+
+    buildStats(chartData);
+    buildTabs(chartData);
+    buildTableDOM(tableData);
+    window.scrollTo(0, 0);
+  } catch(e) {
+    document.getElementById('viz-error').style.display = 'block';
+    document.getElementById('viz-error').textContent = '⚠ ' + e.message;
+  }
+}
+
+function closeViz() {
+  document.getElementById('view-viz').classList.remove('active');
+  document.getElementById('view-list').classList.add('active');
+  clearInterval(rtInterval);
+  document.getElementById('rt-toggle').checked = false;
+  document.getElementById('rt-status').textContent = 'Off';
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {};
+}
+
+// ── Chart / Table toggle
+function showCharts() {
+  document.getElementById('panel-charts').style.display = 'block';
+  document.getElementById('panel-table').style.display = 'none';
+  document.getElementById('toggle-charts').classList.add('active');
+  document.getElementById('toggle-table').classList.remove('active');
+  document.getElementById('ap-tabs').style.display = 'flex';
+}
+
+function showTable() {
+  document.getElementById('panel-charts').style.display = 'none';
+  document.getElementById('panel-table').style.display = 'block';
+  document.getElementById('toggle-charts').classList.remove('active');
+  document.getElementById('toggle-table').classList.add('active');
+  document.getElementById('ap-tabs').style.display = 'none';
+}
+
+// ── Table
+function buildTableDOM(data) {
+  if (data.error || !data.columns) return;
+  const thead = document.getElementById('table-head');
+  const tbody = document.getElementById('table-body');
+
+  thead.innerHTML = '<tr>' + data.columns.map(c =>
+    `<th>${c}</th>`
+  ).join('') + '</tr>';
+
+  allTableRows = data.rows;
+  renderTableRows(data.rows);
+  updateRowCount(data.rows.length, data.rows.length);
+}
+
+function renderTableRows(rows) {
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = rows.map(row =>
+    '<tr>' + row.map(cell => `<td>${cell}</td>`).join('') + '</tr>'
+  ).join('');
+}
+
+function filterTable() {
+  const q = document.getElementById('table-search').value.toLowerCase();
+  const filtered = q
+    ? allTableRows.filter(row => row.some(cell => String(cell).toLowerCase().includes(q)))
+    : allTableRows;
+  renderTableRows(filtered);
+  updateRowCount(filtered.length, allTableRows.length);
+}
+
+function updateRowCount(shown, total) {
+  document.getElementById('row-count').textContent =
+    shown === total ? `${total} rows` : `${shown} of ${total} rows`;
+}
+
+// ── Stats
+function buildStats(data) {
+  const s = data.stats || {};
+  const items = [
+    { label: 'Total Samples', value: s.total_rows || 0, unit: 'rows' },
+    { label: 'Subcarriers',   value: s.subcarriers || 0, unit: 'channels' },
+    { label: 'Packets',       value: s.packets || 0, unit: 'frames' },
+    { label: 'Avg Amplitude', value: s.avg_amplitude || 0, unit: 'linear' },
+    { label: 'Avg RSSI',      value: s.avg_rssi || 0, unit: 'dBm' },
+  ];
+  document.getElementById('stats-row').innerHTML = items.map(i => `
+    <div class="stat-card">
+      <div class="label">${i.label}</div>
+      <div class="value">${i.value}</div>
+      <div class="unit">${i.unit}</div>
+    </div>`).join('');
+}
+
+// ── AP tabs
+function buildTabs(data) {
+  const aps = (data.stats?.aps || []).map(String);
+  const bar = document.getElementById('ap-tabs');
+  bar.innerHTML = aps.map((ap, i) =>
+    `<div class="tab ${i === 0 ? 'active' : ''}" onclick="switchAP('${ap}', this)">AP ${ap}</div>`
+  ).join('');
+  if (aps.length > 0) { currentAP = aps[0]; renderCharts(aps[0], data); }
+}
+
+function switchAP(ap, el) {
+  currentAP = ap;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  renderCharts(ap, currentData);
+}
+
+// ── Charts
+const baseOpts = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { ticks: { color: '#5a7a9a', font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: 'rgba(255,255,255,0.04)' } },
+    y: { ticks: { color: '#5a7a9a', font: { family: 'IBM Plex Mono', size: 10 } }, grid: { color: 'rgba(255,255,255,0.06)' } }
+  }
+};
+
+function makeChart(id, type, labels, datasets, extra = {}) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
+    type, data: { labels, datasets },
+    options: { ...baseOpts, ...extra }
+  });
+}
+
+function renderCharts(ap, data) {
+  const apStr = String(ap);
+  const aps = (data.stats?.aps || []).map(String);
+  const color = AP_COLORS[aps.indexOf(apStr) % AP_COLORS.length];
+
+  const amp = (data.amplitude_by_subcarrier || {})[apStr] || {};
+  makeChart('chart-amp', 'line', amp.subcarriers || [],
+    [{ data: amp.amplitudes || [], borderColor: color, backgroundColor: color + '18',
+       borderWidth: 2, pointRadius: 2, tension: 0.3, fill: true }]);
+
+  const phase = (data.phase_by_subcarrier || {})[apStr] || {};
+  makeChart('chart-phase', 'line', phase.subcarriers || [],
+    [{ data: phase.phase || [], borderColor: '#a78bfa', backgroundColor: '#a78bfa18',
+       borderWidth: 2, pointRadius: 2, tension: 0.3, fill: true }]);
+
+  const rssi = (data.rssi_by_packet || {})[apStr] || {};
+  makeChart('chart-rssi', 'line', rssi.packets || [],
+    [{ data: rssi.rssi || [], borderColor: '#10b981', backgroundColor: '#10b98118',
+       borderWidth: 2, pointRadius: 1, tension: 0.4, fill: true }]);
+
+  const heat = (data.amplitude_heatmap || {})[apStr] || {};
+  const subs = heat.subcarriers || [];
+  const vals = heat.values || [];
+  const profile = subs.map((_, si) => {
+    const row = vals[si] || [];
+    return row.reduce((a, b) => a + b, 0) / (row.length || 1);
+  });
+  makeChart('chart-heat', 'bar', subs,
+    [{ data: profile, borderRadius: 2, borderWidth: 0,
+       backgroundColor: subs.map((_, i) => {
+         const t = i / Math.max(subs.length - 1, 1);
+         return `rgba(${Math.round(t*124)},${Math.round(212-t*100)},${Math.round(255-t*100)},0.75)`;
+       })
+    }]);
+}
+
+// ── Live refresh
+document.getElementById('rt-toggle').addEventListener('change', function () {
+  if (this.checked) {
+    document.getElementById('rt-status').textContent = 'On · 10s';
+    const ts = document.getElementById('viz-ts-label').textContent;
+    rtInterval = setInterval(() => openViz(ts), 10000);
+  } else {
+    document.getElementById('rt-status').textContent = 'Off';
+    clearInterval(rtInterval);
+  }
+});
+</script>
 </body>
 </html>
