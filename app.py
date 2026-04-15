@@ -3,23 +3,26 @@ import requests
 import pandas as pd
 import io
 import time
+import threading
 
 app = Flask(__name__)
 
-PROJECT_ID = "csi-esp"
+PROJECT_ID = "gui-firebase-56d95"
 COLLECTION = "csi"
 BASE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/{COLLECTION}"
 
 # ── Cache ──
 _cache = {"docs": None, "ts": 0}
-CACHE_TTL = 30
+_cache_lock = threading.Lock()
+CACHE_TTL = 600  # 10 minutes
 
 def get_docs():
     now = time.time()
-    if _cache["docs"] is None or now - _cache["ts"] > CACHE_TTL:
-        _cache["docs"] = parse_docs(fetch_all_docs())
-        _cache["ts"] = now
-    return _cache["docs"]
+    with _cache_lock:
+        if _cache["docs"] is None or now - _cache["ts"] > CACHE_TTL:
+            _cache["docs"] = parse_docs(fetch_all_docs())
+            _cache["ts"] = now
+        return _cache["docs"]
 
 def fetch_all_docs():
     docs = []
@@ -220,10 +223,9 @@ def delete(timestamp):
     selected = grouped.get(timestamp, [])
     names = [d.get("name") for d in selected if "name" in d]
     delete_documents(names)
-    # invalidate cache after delete
     _cache["docs"] = None
     return redirect("/")
 
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(debug=True)

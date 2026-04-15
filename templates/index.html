@@ -185,7 +185,7 @@ async function pollLatest() {
   }
 }
 pollLatest();
-setInterval(pollLatest, 15000);
+setInterval(pollLatest, 600000);
 
 function openLatest() { if (latestTs) openViz(latestTs); }
 
