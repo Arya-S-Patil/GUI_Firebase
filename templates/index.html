@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CSI Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<h1>📡 CSI Visualizer</h1>
+
+<div class="controls">
+    <form method="get">
+        <label>Sort timestamps:</label>
+        <select name="sort" onchange="this.form.submit()">
+            <option value="desc" {% if sort=="desc" %}selected{% endif %}>Newest</option>
+            <option value="asc" {% if sort=="asc" %}selected{% endif %}>Oldest</option>
+        </select>
+    </form>
+</div>
+
+<table>
+<tr>
+    <th>Timestamp</th>
+    <th>Actions</th>
+</tr>
+
+{% for ts in timestamps %}
+<tr>
+    <td>{{ ts }}</td>
+    <td>
+        <a class="btn" href="/download/{{ ts }}?sort_by=subcarrier">CSV (Subcarrier)</a>
+        <a class="btn" href="/download/{{ ts }}?sort_by=packet">CSV (Packet)</a>
+
+        <form action="/delete/{{ ts }}" method="post" style="display:inline;">
+            <button class="delete-btn" type="submit">Delete</button>
+        </form>
+    </td>
+</tr>
+{% endfor %}
+
+</table>
+
+</body>
+</html>
