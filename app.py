@@ -4,12 +4,13 @@ import pandas as pd
 import io
 import time
 import threading
-
+import os
 app = Flask(__name__)
 
-PROJECT_ID = "gui-firebase-56d95"
-COLLECTION = "csi"
+PROJECT_ID = os.getenv('PROJECT_ID')
+COLLECTION = os.getenv('COLLECTION')
 BASE_URL = f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}/databases/(default)/documents/{COLLECTION}"
+
 
 # ── Cache ──
 _cache = {"docs": None, "ts": 0}
